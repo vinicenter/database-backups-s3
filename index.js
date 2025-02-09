@@ -13,7 +13,7 @@ function loadConfig() {
     'AWS_S3_ENDPOINT',
     'AWS_S3_BUCKET'
   ];
-  
+
   for (const key of requiredEnvars) {
     if (!process.env[key]) {
       throw new Error(`Environment variable ${key} is required`);
@@ -30,6 +30,13 @@ function loadConfig() {
     },
     databases: process.env.DATABASES ? process.env.DATABASES.split(",") : [],
     run_on_startup: process.env.RUN_ON_STARTUP === 'true' ? true : false,
+    notify: {
+      telegram: {
+        isEnabled: !!process.env.TELEGRAM_TOKEN,
+        token: process.env.TELEGRAM_TOKEN,
+        chatIds: process.env.TELEGRAM_CHAT_IDS ? process.env.TELEGRAM_CHAT_IDS.split(",") : [],
+      }
+    },
     cron: process.env.CRON,
   };
 }
@@ -55,7 +62,7 @@ async function processBackup() {
     const dbUser = url.username;
     const dbPassword = url.password;
     const dbPort = url.port;
-  
+
     const date = new Date();
     const yyyy = date.getFullYear();
     const mm = String(date.getMonth() + 1).padStart(2, '0');
@@ -67,7 +74,9 @@ async function processBackup() {
     const filename = `backup-${dbType}-${timestamp}-${dbName}-${dbHostname}.tar.gz`;
     const filepath = `/tmp/${filename}`;
 
-    console.log(`\n[${databaseIteration}/${totalDatabases}] ${dbType}/${dbName} Backup in progress...`);
+    const startBackupMessage = `\n[${databaseIteration}/${totalDatabases}] ${dbType}/${dbName} Backup in progress...`
+    await notifyTelegram(startBackupMessage);
+    console.log(startBackupMessage)
 
     let dumpCommand;
     switch (dbType) {
@@ -104,11 +113,43 @@ async function processBackup() {
 
       const putCommand = new s3.PutObjectCommand(params);
       await s3Client.send(putCommand);
-      
+
+      const message = `✓ Successfully uploaded db backup for database ${dbType} ${dbName} ${dbHostname}.`;
+
+      await notifyTelegram(message);
       console.log(`✓ Successfully uploaded db backup for database ${dbType} ${dbName} ${dbHostname}.`);
     } catch (error) {
-      console.error(`An error occurred while processing the database ${dbType} ${dbName}, host: ${dbHostname}): ${error}`);
+      const message = `✗ An error occurred while processing the database ${dbType} ${dbName}, host: ${dbHostname}): ${error}`;
+      await notifyTelegram(message);
+      console.error(message);
     }
+  }
+}
+
+async function notifyTelegram(message) {
+  try {
+    if (!config.notify.telegram.isEnabled) {
+      console.log("Telegram notifications are disabled. Define TELEGRAM_TOKEN and TELEGRAM_CHAT_IDS to enable.");
+  
+      return;
+    }
+  
+    const chatIds = config.notify.telegram.chatIds;
+  
+    if (!chatIds.length) {
+      console.log("No chat IDs defined for Telegram notifications. Define TELEGRAM_CHAT_IDS to enable.");
+  
+      return;
+    }
+
+    const newMessage = `[eGesto Backup Database] ${message}`;
+  
+    for (const chatId of chatIds) {
+      const url = `https://api.telegram.org/bot${config.notify.telegram.token}/sendMessage?chat_id=${chatId}&text=${newMessage}`;
+      await fetch(url);
+    }
+  } catch(e) {
+    console.error("An error occurred while sending Telegram notification.", e);
   }
 }
 
@@ -116,7 +157,7 @@ if (config.cron) {
   const CronJob = cron.CronJob;
   const job = new CronJob(config.cron, processBackup);
   job.start();
-  
+
   console.log(`Backups configured on Cron job schedule: ${config.cron}`);
 }
 
